@@ -69,4 +69,11 @@ export interface Operation {
   pendingText?: string;
   history: OperationEvent[];
   retryCount: number;
+  /**
+   * Snapshot of `mutedFromMessageId` taken at the moment a rollback/edit
+   * operation started. Used to revert the optimistic mute boundary if
+   * the operation is aborted (Stop) or explicitly cancelled from the
+   * failed-callout. Not relevant for `send`.
+   */
+  previousMutedFromMessageId?: string | null;
 }

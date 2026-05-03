@@ -1,5 +1,6 @@
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useAutoScroll } from "@/hooks/useAutoScroll";
+import { cn } from "@/lib/utils";
 import { MAX_ATTEMPTS, useChatStore } from "@/stores/chat-store";
 import type {
   AgentTextMessage,
@@ -16,6 +17,20 @@ import { ToolOperationMessage } from "./ToolOperationMessage";
 import { UserMessage } from "./UserMessage";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { ScrollToBottomButton } from "./ScrollToBottomButton";
+
+/**
+ * Visual styling applied to messages inside the muted suffix (everything
+ * from `mutedFromMessageId` to the end). Recoverability is preserved:
+ * partial de-muting via rollback to a muted message restores opacity, and
+ * a new user message burns the suffix entirely.
+ *
+ * Single-property treatment (`opacity-50`) is intentional: the muted
+ * suffix always starts at a clearly recognizable user-message bubble,
+ * so the visual delimiter is built-in and an extra border/divider only
+ * adds noise. The `transition-opacity` keeps boundary changes smooth
+ * (rollback success, partial de-muting, or burn on new user message).
+ */
+const MUTED_WRAPPER_CLASSES = "opacity-50 transition-opacity";
 
 interface MessageListProps {
   messages: ChatMessage[];
@@ -100,6 +115,7 @@ export function MessageList({ messages }: MessageListProps) {
   const currentOperation = useChatStore((s) => s.currentOperation);
   const retryCurrentOperation = useChatStore((s) => s.retryCurrentOperation);
   const cancelCurrentOperation = useChatStore((s) => s.cancelCurrentOperation);
+  const mutedFromMessageId = useChatStore((s) => s.mutedFromMessageId);
 
   const isOperationActive =
     currentOperation !== null && currentOperation.status !== "failed";
@@ -152,11 +168,18 @@ export function MessageList({ messages }: MessageListProps) {
     prevMessageCountRef.current = currentCount;
   }, [messages.length, onContentAdded, onUserMessageSent]);
 
+  // Auto-scroll on operation start only when the operation has no anchor
+  // (i.e. plain "send" — its WorkingIndicator renders at the bottom of
+  // the list, so jumping there is the right thing). For rollback/edit
+  // the anchor is somewhere in the middle of the history; scrolling to
+  // the bottom would yank the user away from the message they just
+  // clicked, which is exactly the place the indicator appears.
+  const operationAnchorId = currentOperation?.anchorMessageId ?? null;
   useEffect(() => {
-    if (isOperationActive) {
+    if (isOperationActive && operationAnchorId === null) {
       onContentAdded();
     }
-  }, [isOperationActive, onContentAdded]);
+  }, [isOperationActive, operationAnchorId, onContentAdded]);
 
   const renderMessage = (message: ChatMessage) => {
     switch (message.type) {
@@ -215,10 +238,16 @@ export function MessageList({ messages }: MessageListProps) {
 
   const renderMessages = () => {
     const elements: React.ReactNode[] = [];
-    let toolCallGroup: ChatMessage[] = [];
+    let toolCallGroup: { message: ChatMessage; isMuted: boolean }[] = [];
 
     const anchorId = currentOperation?.anchorMessageId;
     let anchorRendered = false;
+
+    // Find the muted suffix boundary once per render. -1 means no muted
+    // zone, otherwise every index >= mutedFromIndex is muted.
+    const mutedFromIndex = mutedFromMessageId
+      ? messages.findIndex((m) => m.id === mutedFromMessageId)
+      : -1;
 
     const renderAnchorIfMatches = (id: string) => {
       if (!anchorId || anchorRendered) return;
@@ -239,31 +268,40 @@ export function MessageList({ messages }: MessageListProps) {
       const lastInGroup = toolCallGroup[toolCallGroup.length - 1];
       elements.push(
         <div
-          key={`tool-group-${toolCallGroup[0].id}`}
+          key={`tool-group-${toolCallGroup[0].message.id}`}
           className="space-y-2 min-w-0"
         >
-          {toolCallGroup.map((msg) => (
-            <div key={msg.id} id={`message-${msg.id}`}>
+          {toolCallGroup.map(({ message: msg, isMuted }) => (
+            <div
+              key={msg.id}
+              id={`message-${msg.id}`}
+              className={cn(isMuted && MUTED_WRAPPER_CLASSES)}
+            >
               {renderMessage(msg)}
             </div>
           ))}
         </div>,
       );
-      renderAnchorIfMatches(lastInGroup.id);
+      renderAnchorIfMatches(lastInGroup.message.id);
       toolCallGroup = [];
     };
 
     for (let i = 0; i < messages.length; i++) {
       const message = messages[i];
+      const isMuted = mutedFromIndex !== -1 && i >= mutedFromIndex;
 
       if (isToolCallMessage(message)) {
-        toolCallGroup.push(message);
+        toolCallGroup.push({ message, isMuted });
         continue;
       }
 
       flushToolCallGroup();
       elements.push(
-        <div key={message.id} id={`message-${message.id}`} className="min-w-0">
+        <div
+          key={message.id}
+          id={`message-${message.id}`}
+          className={cn("min-w-0", isMuted && MUTED_WRAPPER_CLASSES)}
+        >
           {renderMessage(message)}
         </div>,
       );

@@ -226,31 +226,38 @@ export const useChatStore = create<ChatState>((set, get) => {
       if (targetIndex === -1) {
         // Target was removed in the meantime (very unlikely — we block other
         // operations while this one runs, but keep a defensive bail-out).
+        // Revert the optimistic mute boundary so we don't leave a stale
+        // suffix pointing at a missing id.
+        set({
+          mutedFromMessageId: op.previousMutedFromMessageId ?? null,
+        });
         clearOperation();
         return;
       }
 
-      // Rollback target itself goes into the muted suffix: the file is
-      // reverted to the state BEFORE this message, so leaving the target
-      // active would yield an unanswered user message in the live history
-      // and cause the next send to render two consecutive user bubbles
-      // sharing one agent reply after the muted suffix is burned.
-      const newMutedFromMessageId = messages[targetIndex].id;
-
+      // mutedFromMessageId was already set optimistically in startRollback.
+      // Here we only need to commit fileContent and resync responseIndex
+      // against the now-frozen muted boundary so the mock generator
+      // resumes from the right place on the next send.
       set({
-        mutedFromMessageId: newMutedFromMessageId,
         fileContent: result.fileContent,
-        responseIndex: recomputeResponseIndex(
-          messages,
-          newMutedFromMessageId,
-        ),
+        responseIndex: recomputeResponseIndex(messages, targetId),
       });
 
       clearOperation();
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
+        // Stop = user pulled out — undo the optimistic mute so the chat
+        // returns to the pre-rollback state. fileContent was never touched.
+        set({
+          mutedFromMessageId: op.previousMutedFromMessageId ?? null,
+        });
         clearOperation();
       } else {
+        // All retries exhausted: leave the optimistic mute in place so
+        // the user sees what's about to be discarded. They can Retry to
+        // try again or Cancel to roll the boundary back to its prior
+        // value (handled in cancelCurrentOperation).
         updateOperation({ status: "failed", retryCount: MAX_ATTEMPTS });
         activeController = null;
       }
@@ -417,7 +424,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       // trigger, but this guard makes the action safe to call directly.
       if (get().currentOperation !== null) return;
 
-      const messages = get().messages;
+      const { messages, mutedFromMessageId: previousMuted } = get();
       if (!messages.some((m) => m.id === targetMessageId)) return;
 
       const operation: Operation = {
@@ -427,8 +434,19 @@ export const useChatStore = create<ChatState>((set, get) => {
         anchorMessageId: targetMessageId,
         history: [],
         retryCount: 0,
+        previousMutedFromMessageId: previousMuted,
       };
-      set({ currentOperation: operation });
+
+      // Optimistic mute: flip the boundary the instant the user confirms,
+      // so the target and everything after it visibly fade before the
+      // service round-trip completes. fileContent and responseIndex stay
+      // untouched until success — they can only change once the service
+      // returns the new file. On Stop or Cancel-from-failed we restore
+      // the boundary from `previousMutedFromMessageId`.
+      set({
+        currentOperation: operation,
+        mutedFromMessageId: targetMessageId,
+      });
 
       await runRollbackOperation();
     },
@@ -458,6 +476,14 @@ export const useChatStore = create<ChatState>((set, get) => {
     cancelCurrentOperation: () => {
       const op = get().currentOperation;
       if (!op || op.status !== "failed") return;
+      // For rollback (and future edit) the mute boundary was applied
+      // optimistically at startRollback; on Cancel-from-failed we have
+      // to undo it so the user lands back in the pre-rollback state.
+      if (op.type === "rollback" || op.type === "edit") {
+        set({
+          mutedFromMessageId: op.previousMutedFromMessageId ?? null,
+        });
+      }
       clearOperation();
     },
 
