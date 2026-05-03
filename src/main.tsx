@@ -4,8 +4,9 @@ import "./styles/index.css";
 import App from "./App";
 
 if (import.meta.env.DEV) {
-  // Dynamic import keeps dev-only mock controls out of the production bundle.
+  // Dynamic imports keep dev-only controls out of the production bundle.
   void import("./dev/mockControls");
+  void import("./dev/storeControls");
 }
 
 createRoot(document.getElementById("root")!).render(
