@@ -50,3 +50,23 @@ export type ChatMessage =
   | AgentTextMessage
   | UserMessage
   | ErrorMessage;
+
+export type OperationType = "send" | "rollback" | "edit";
+
+export type OperationStatus = "running" | "retrying" | "failed";
+
+export interface OperationEvent {
+  id: string;
+  timestamp: string;
+  message: string;
+}
+
+export interface Operation {
+  id: string;
+  type: OperationType;
+  status: OperationStatus;
+  anchorMessageId?: string;
+  pendingText?: string;
+  history: OperationEvent[];
+  retryCount: number;
+}
