@@ -3,7 +3,6 @@ import type {
   ChatMessage,
   MessageFeedback,
   Operation,
-  OperationStatus,
   ToolOperationStatus,
 } from "@/types/chat";
 import {
@@ -14,7 +13,7 @@ import {
 } from "@/services/mock-backend";
 import { withRetry } from "@/lib/withRetry";
 
-const MAX_ATTEMPTS = 3;
+export const MAX_ATTEMPTS = 3;
 
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -56,6 +55,8 @@ interface ChatState {
 
   appendUserMessage: (text: string) => Promise<void>;
   interruptCurrentOperation: () => Promise<void>;
+  retryCurrentOperation: () => Promise<void>;
+  cancelCurrentOperation: () => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => {
@@ -95,6 +96,58 @@ export const useChatStore = create<ChatState>((set, get) => {
   };
 
   /**
+   * Drive the current "send" operation through withRetry. Used both by the
+   * initial appendUserMessage and by user-triggered retryCurrentOperation,
+   * so they share identical retry/abort/failure semantics.
+   *
+   * On exhausted retries the operation is left in `failed` state so the UI
+   * can render a callout with Retry / Cancel actions; nothing is added to
+   * chat history. On abort (Stop) we add a single "Agent stopped by user"
+   * message and clear the operation.
+   */
+  const runSendOperation = async (): Promise<void> => {
+    const controller = new AbortController();
+    activeController = controller;
+
+    try {
+      await withRetry(runSendStream, {
+        signal: controller.signal,
+        maxAttempts: MAX_ATTEMPTS,
+        onAttempt: (n) => {
+          if (n === 1) {
+            appendOperationEvent("Sending message...");
+          } else {
+            updateOperation({ status: "retrying", retryCount: n - 1 });
+            appendOperationEvent(
+              `Reconnecting (attempt ${n} of ${MAX_ATTEMPTS})...`,
+            );
+          }
+        },
+        onError: (n, err) => {
+          appendOperationEvent(`Attempt ${n} failed: ${err.message}`);
+        },
+      });
+
+      clearOperation();
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        get().addMessage({
+          id: generateId(),
+          type: "error",
+          message: "Agent stopped by user",
+          timestamp: new Date().toISOString(),
+        });
+        clearOperation();
+      } else {
+        // All retries exhausted: keep the operation around as `failed` so the
+        // MessageList can render an inline callout with Retry/Cancel.
+        updateOperation({ status: "failed", retryCount: MAX_ATTEMPTS });
+        activeController = null;
+      }
+    }
+  };
+
+  /**
    * One pass through the mock generator. Idempotent across retries: errors
    * in mock-backend.sendMessage are thrown BEFORE yield, so each successful
    * yield permanently advances responseIndex and never repeats.
@@ -113,6 +166,15 @@ export const useChatStore = create<ChatState>((set, get) => {
       newIndex,
     } of generator) {
       set({ responseIndex: newIndex });
+
+      // First successful yield after a retry — flip status back to "running"
+      // so the indicator stops showing "Reconnecting (attempt N of M)..."
+      // once data starts flowing again.
+      const op = get().currentOperation;
+      if (op && op.status === "retrying") {
+        updateOperation({ status: "running" });
+        appendOperationEvent("Reconnected.");
+      }
 
       if (response.type === "text") {
         get().addMessage({
@@ -236,60 +298,38 @@ export const useChatStore = create<ChatState>((set, get) => {
         id: generateId(),
         type: "send",
         status: "running",
-        anchorMessageId: userMessage.id,
+        // No anchorMessageId for send: the MessageList fallback renders the
+        // indicator at the end of the list, so it naturally stays below each
+        // newly streamed response instead of being pinned under the user
+        // message. Rollback/edit will set anchorMessageId explicitly.
         history: [],
         retryCount: 0,
       };
       set({ currentOperation: operation });
 
-      const controller = new AbortController();
-      activeController = controller;
+      await runSendOperation();
+    },
 
-      try {
-        await withRetry(runSendStream, {
-          signal: controller.signal,
-          maxAttempts: MAX_ATTEMPTS,
-          onAttempt: (n) => {
-            if (n === 1) {
-              appendOperationEvent("Sending message...");
-            } else {
-              const status: OperationStatus = "retrying";
-              updateOperation({ status, retryCount: n - 1 });
-              appendOperationEvent(
-                `Reconnecting (attempt ${n} of ${MAX_ATTEMPTS})...`,
-              );
-            }
-          },
-          onError: (n, err) => {
-            appendOperationEvent(`Attempt ${n} failed: ${err.message}`);
-          },
-        });
+    retryCurrentOperation: async () => {
+      const op = get().currentOperation;
+      if (!op || op.status !== "failed") return;
 
-        clearOperation();
-      } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") {
-          get().addMessage({
-            id: generateId(),
-            type: "error",
-            message: "Agent stopped by user",
-            timestamp: new Date().toISOString(),
-          });
-        } else {
-          // All retries exhausted. The dedicated failed-callout UI lands in
-          // c07; for now we preserve the existing behavior and surface the
-          // failure as a chat-history error message.
-          get().addMessage({
-            id: generateId(),
-            type: "error",
-            message:
-              error instanceof Error
-                ? error.message
-                : "Unknown error occurred",
-            timestamp: new Date().toISOString(),
-          });
-        }
-        clearOperation();
-      }
+      // Currently only the send operation can be retried. Rollback/edit retry
+      // wiring lands in c08/c12 alongside their respective actions.
+      if (op.type !== "send") return;
+
+      // Reset to running for a fresh attempt; keep accumulated history so the
+      // user can still expand it and see prior failures.
+      updateOperation({ status: "running", retryCount: 0 });
+      appendOperationEvent("Retrying...");
+
+      await runSendOperation();
+    },
+
+    cancelCurrentOperation: () => {
+      const op = get().currentOperation;
+      if (!op || op.status !== "failed") return;
+      clearOperation();
     },
 
     interruptCurrentOperation: async () => {

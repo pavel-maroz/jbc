@@ -23,7 +23,7 @@ export default function App() {
       */}
       <div className="w-[30%] min-w-0 flex flex-col bg-sidebar border-r border-sidebar-border">
         <ChatHeader />
-        <MessageList messages={messages} isAgentWorking={isAgentWorking} />
+        <MessageList messages={messages} />
         <ChatInput
           onSubmit={appendUserMessage}
           isAgentWorking={isAgentWorking}
