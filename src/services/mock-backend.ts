@@ -23,14 +23,56 @@ const ERROR_DELAY = 5000;
 const STOP_DELAY = 1000;
 const ROLLBACK_DELAY = 5000;
 
+/**
+ * Runtime overrides for shouldError(). Both default to "no override":
+ *
+ *  - `runtimeErrorRate` — when non-null, replaces the constant ERROR_RATE.
+ *  - `forceFailRemaining` — when > 0, the next N shouldError() checks return
+ *    true unconditionally and the counter is decremented each time.
+ *
+ * Both are mutated by `mockControls` (exposed to window in DEV builds via
+ * `src/dev/mockControls.ts`). Production builds never touch them.
+ */
+let runtimeErrorRate: number | null = null;
+let forceFailRemaining = 0;
+
 function randomDelay(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
 function shouldError(forceError?: boolean): boolean {
   if (forceError) return true;
-  return Math.random() < ERROR_RATE;
+  if (forceFailRemaining > 0) {
+    forceFailRemaining--;
+    return true;
+  }
+  const rate = runtimeErrorRate ?? ERROR_RATE;
+  return Math.random() < rate;
 }
+
+export const mockControls = {
+  /** Override the random error rate for all mock backend calls. Pass null to revert to default. */
+  setErrorRate(rate: number | null) {
+    runtimeErrorRate = rate;
+  },
+  /** Force the next N shouldError() checks to return true. Useful for triggering the failed callout. */
+  forceFailNext(count: number) {
+    forceFailRemaining = Math.max(0, count);
+  },
+  /** Reset both the runtime error rate and the force-fail counter to defaults. */
+  reset() {
+    runtimeErrorRate = null;
+    forceFailRemaining = 0;
+  },
+  /** Read the current effective error rate. */
+  getErrorRate() {
+    return runtimeErrorRate ?? ERROR_RATE;
+  },
+  /** Read the remaining force-fail counter. */
+  getForceFailRemaining() {
+    return forceFailRemaining;
+  },
+};
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
