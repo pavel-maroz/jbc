@@ -6,8 +6,10 @@ import type {
   ToolOperationStatus,
 } from "@/types/chat";
 import {
+  getResponseCount,
   getToolDisplayName,
   getToolTarget,
+  rollbackToMessage as rollbackToMessageService,
   sendMessage,
   stopAgent,
 } from "@/services/mock-backend";
@@ -33,6 +35,15 @@ interface ChatState {
   fileContent: string[];
   responseIndex: number;
   currentOperation: Operation | null;
+  /**
+   * Id of the first message in the muted suffix (everything from this
+   * message to the end of `messages` is rolled back but kept around for
+   * recoverability). `null` means there is no muted suffix.
+   *
+   * Invariant: muted zone is always a contiguous suffix; we never have a
+   * muted segment in the middle of the active history.
+   */
+  mutedFromMessageId: string | null;
 
   addMessage: (message: ChatMessage) => void;
   updateToolStatus: (
@@ -47,13 +58,9 @@ interface ChatState {
     feedbackText?: string,
   ) => void;
   clearMessages: () => void;
-  /**
-   * Legacy synchronous rollback used by ChatHeader. Will be replaced by an
-   * async startRollback action in c08 alongside the muted-zone work.
-   */
-  rollbackToMessage: (messageId: string) => void;
 
   appendUserMessage: (text: string) => Promise<void>;
+  startRollback: (targetMessageId: string) => Promise<void>;
   interruptCurrentOperation: () => Promise<void>;
   retryCurrentOperation: () => Promise<void>;
   cancelCurrentOperation: () => void;
@@ -93,6 +100,32 @@ export const useChatStore = create<ChatState>((set, get) => {
   const clearOperation = () => {
     activeController = null;
     set({ currentOperation: null });
+  };
+
+  /**
+   * Re-derive responseIndex from the active prefix of the message history.
+   *
+   * Invariant kept by all store actions:
+   *   responseIndex === count(agent_message + tool_operation in active prefix)
+   *                    mod HARDCODED_RESPONSES.length
+   *
+   * Without this recompute after a rollback, the mock would keep counting
+   * from where it left off and the next send would resume in the middle of
+   * the scripted scenario instead of replaying it from the rollback point.
+   */
+  const recomputeResponseIndex = (
+    messages: ChatMessage[],
+    mutedFromId: string | null,
+  ): number => {
+    const total = getResponseCount();
+    let count = 0;
+    for (const msg of messages) {
+      if (mutedFromId && msg.id === mutedFromId) break;
+      if (msg.type === "agent_message" || msg.type === "tool_operation") {
+        count++;
+      }
+    }
+    return total > 0 ? count % total : 0;
   };
 
   /**
@@ -141,6 +174,83 @@ export const useChatStore = create<ChatState>((set, get) => {
       } else {
         // All retries exhausted: keep the operation around as `failed` so the
         // MessageList can render an inline callout with Retry/Cancel.
+        updateOperation({ status: "failed", retryCount: MAX_ATTEMPTS });
+        activeController = null;
+      }
+    }
+  };
+
+  /**
+   * Drive the current "rollback" operation through withRetry. Used both by
+   * startRollback and by user-triggered retryCurrentOperation, so they share
+   * identical retry/abort/failure semantics.
+   *
+   * On success we shift the muted boundary, swap fileContent and recompute
+   * responseIndex so the mock resumes from the rollback point. On abort we
+   * just clear the operation (no chat-history breadcrumb — Stop on a
+   * rollback is a clean cancel). On exhausted retries we leave the operation
+   * in `failed` state for the inline callout.
+   */
+  const runRollbackOperation = async (): Promise<void> => {
+    const op = get().currentOperation;
+    if (!op || op.type !== "rollback" || !op.anchorMessageId) return;
+    const targetId = op.anchorMessageId;
+
+    const controller = new AbortController();
+    activeController = controller;
+
+    try {
+      const result = await withRetry(
+        (signal) => rollbackToMessageService(targetId, get().messages, signal),
+        {
+          signal: controller.signal,
+          maxAttempts: MAX_ATTEMPTS,
+          onAttempt: (n) => {
+            if (n === 1) {
+              appendOperationEvent("Rolling back...");
+            } else {
+              updateOperation({ status: "retrying", retryCount: n - 1 });
+              appendOperationEvent(
+                `Reconnecting (attempt ${n} of ${MAX_ATTEMPTS})...`,
+              );
+            }
+          },
+          onError: (n, err) => {
+            appendOperationEvent(`Attempt ${n} failed: ${err.message}`);
+          },
+        },
+      );
+
+      const messages = get().messages;
+      const targetIndex = messages.findIndex((m) => m.id === targetId);
+      if (targetIndex === -1) {
+        // Target was removed in the meantime (very unlikely — we block other
+        // operations while this one runs, but keep a defensive bail-out).
+        clearOperation();
+        return;
+      }
+
+      // Rollback target itself goes into the muted suffix: the file is
+      // reverted to the state BEFORE this message, so leaving the target
+      // active would yield an unanswered user message in the live history
+      // and cause the next send to render two consecutive user bubbles
+      // sharing one agent reply after the muted suffix is burned.
+      const newMutedFromMessageId = messages[targetIndex].id;
+
+      set({
+        mutedFromMessageId: newMutedFromMessageId,
+        fileContent: result.fileContent,
+        responseIndex: recomputeResponseIndex(
+          messages,
+          newMutedFromMessageId,
+        ),
+      });
+
+      clearOperation();
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        clearOperation();
+      } else {
         updateOperation({ status: "failed", retryCount: MAX_ATTEMPTS });
         activeController = null;
       }
@@ -215,6 +325,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     fileContent: [],
     responseIndex: 0,
     currentOperation: null,
+    mutedFromMessageId: null,
 
     addMessage: (message) => {
       set((state) => ({
@@ -255,44 +366,35 @@ export const useChatStore = create<ChatState>((set, get) => {
         fileContent: [],
         responseIndex: 0,
         currentOperation: null,
-      });
-    },
-
-    rollbackToMessage: (messageId) => {
-      const { messages } = get();
-      const index = messages.findIndex((m) => m.id === messageId);
-      if (index === -1) return;
-
-      const newMessages = messages.slice(0, index + 1);
-
-      let newFileContent: string[] = [];
-      for (let i = newMessages.length - 1; i >= 0; i--) {
-        const msg = newMessages[i];
-        if (
-          msg.type === "tool_operation" &&
-          msg.toolName === "edit_file" &&
-          msg.status === "completed" &&
-          msg.fileContent
-        ) {
-          newFileContent = msg.fileContent;
-          break;
-        }
-      }
-
-      set({
-        messages: newMessages,
-        fileContent: newFileContent,
+        mutedFromMessageId: null,
       });
     },
 
     appendUserMessage: async (text) => {
+      // Burning the muted suffix on a new user message is irreversible —
+      // it's the explicit signal that the user accepts the post-rollback
+      // state as the new point of growth.
+      const { messages, mutedFromMessageId } = get();
+      let baseMessages = messages;
+      if (mutedFromMessageId) {
+        const cutIndex = messages.findIndex(
+          (m) => m.id === mutedFromMessageId,
+        );
+        if (cutIndex !== -1) {
+          baseMessages = messages.slice(0, cutIndex);
+        }
+      }
+
       const userMessage: ChatMessage = {
         id: generateId(),
         type: "user",
         content: text,
         timestamp: new Date().toISOString(),
       };
-      get().addMessage(userMessage);
+      set({
+        messages: [...baseMessages, userMessage],
+        mutedFromMessageId: null,
+      });
 
       const operation: Operation = {
         id: generateId(),
@@ -310,20 +412,47 @@ export const useChatStore = create<ChatState>((set, get) => {
       await runSendOperation();
     },
 
+    startRollback: async (targetMessageId: string) => {
+      // Block when something else is in flight; UI also disables the
+      // trigger, but this guard makes the action safe to call directly.
+      if (get().currentOperation !== null) return;
+
+      const messages = get().messages;
+      if (!messages.some((m) => m.id === targetMessageId)) return;
+
+      const operation: Operation = {
+        id: generateId(),
+        type: "rollback",
+        status: "running",
+        anchorMessageId: targetMessageId,
+        history: [],
+        retryCount: 0,
+      };
+      set({ currentOperation: operation });
+
+      await runRollbackOperation();
+    },
+
     retryCurrentOperation: async () => {
       const op = get().currentOperation;
       if (!op || op.status !== "failed") return;
-
-      // Currently only the send operation can be retried. Rollback/edit retry
-      // wiring lands in c08/c12 alongside their respective actions.
-      if (op.type !== "send") return;
 
       // Reset to running for a fresh attempt; keep accumulated history so the
       // user can still expand it and see prior failures.
       updateOperation({ status: "running", retryCount: 0 });
       appendOperationEvent("Retrying...");
 
-      await runSendOperation();
+      switch (op.type) {
+        case "send":
+          await runSendOperation();
+          break;
+        case "rollback":
+          await runRollbackOperation();
+          break;
+        case "edit":
+          // Edit retry lands in c12 alongside submitEdit.
+          break;
+      }
     },
 
     cancelCurrentOperation: () => {
