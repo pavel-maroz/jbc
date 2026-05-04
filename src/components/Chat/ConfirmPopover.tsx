@@ -2,10 +2,9 @@ import type { ReactNode } from "react";
 import * as Popover from "@radix-ui/react-popover";
 import { cn } from "@/lib/utils";
 
-export interface ConfirmPopoverProps {
+interface ConfirmPopoverShared {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  trigger: ReactNode;
   title?: string;
   description: string;
   confirmLabel?: string;
@@ -20,10 +19,21 @@ export interface ConfirmPopoverProps {
   align?: "start" | "center" | "end";
 }
 
+/**
+ * Either `trigger` (click-to-open) or `anchor` (controlled open, position
+ * relative to another node — e.g. keyboard submit from a textarea).
+ */
+export type ConfirmPopoverProps = ConfirmPopoverShared &
+  (
+    | { trigger: ReactNode; anchor?: undefined }
+    | { anchor: ReactNode; trigger?: undefined }
+  );
+
 export function ConfirmPopover({
   open,
   onOpenChange,
   trigger,
+  anchor,
   title,
   description,
   confirmLabel = "Confirm",
@@ -40,7 +50,11 @@ export function ConfirmPopover({
 
   return (
     <Popover.Root open={open} onOpenChange={onOpenChange}>
-      <Popover.Trigger asChild>{trigger}</Popover.Trigger>
+      {anchor != null ? (
+        <Popover.Anchor asChild>{anchor}</Popover.Anchor>
+      ) : (
+        <Popover.Trigger asChild>{trigger}</Popover.Trigger>
+      )}
       <Popover.Portal>
         <Popover.Content
           side={side}
