@@ -1,6 +1,7 @@
-import { Pencil, RotateCcw } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Send, Undo2 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
+import { useAutoGrowTextarea } from "@/hooks/useAutoGrowTextarea";
 import { useChatStore } from "@/stores/chat-store";
 import type { UserMessage as UserMessageType } from "@/types/chat";
 import { ConfirmPopover } from "./ConfirmPopover";
@@ -8,6 +9,9 @@ import { ConfirmPopover } from "./ConfirmPopover";
 interface UserMessageProps {
   message: UserMessageType;
 }
+
+const EDIT_MIN_LINES = 2;
+const EDIT_MAX_LINES = 8;
 
 export function UserMessage({ message }: UserMessageProps) {
   const currentOperation = useChatStore((s) => s.currentOperation);
@@ -20,22 +24,34 @@ export function UserMessage({ message }: UserMessageProps) {
   const [draft, setDraft] = useState(message.content);
   const [replaceConfirmOpen, setReplaceConfirmOpen] = useState(false);
 
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const {
+    ref: textareaRef,
+    element: textareaEl,
+    onInput: handleInput,
+    minHeight,
+  } = useAutoGrowTextarea({
+    minLines: EDIT_MIN_LINES,
+    maxLines: EDIT_MAX_LINES,
+  });
 
   const isOperationActive = currentOperation !== null;
-
   const isMuteBoundary = message.id === mutedFromMessageId;
 
+  // When entering edit-mode the textarea isn't in the DOM yet, so we
+  // wait one frame to focus it, place the caret at the end, and run a
+  // first auto-grow pass so the box matches the current content height
+  // instead of starting at minHeight and "popping" on the first keystroke.
   useEffect(() => {
     if (!editing) return;
     const id = requestAnimationFrame(() => {
-      const el = textareaRef.current;
+      const el = textareaEl.current;
       if (!el) return;
       el.focus();
       el.setSelectionRange(el.value.length, el.value.length);
+      handleInput();
     });
     return () => cancelAnimationFrame(id);
-  }, [editing]);
+  }, [editing, handleInput, textareaEl]);
 
   const enterEdit = () => {
     setDraft(message.content);
@@ -58,12 +74,20 @@ export function UserMessage({ message }: UserMessageProps) {
     setReplaceConfirmOpen(true);
   };
 
-  const bubble = (
+  const canSubmit =
+    !isOperationActive &&
+    draft.trim().length > 0 &&
+    draft.trim() !== message.content.trim();
+
+  return (
     <div
       className={cn(
-        "border border-border bg-sidebar-accent rounded-lg px-3 py-1.5 min-w-0",
-        editing && "ring-1 ring-ring/60",
-        !editing && !isOperationActive && "cursor-pointer",
+        "group/user relative bg-sidebar-accent rounded-lg min-w-0",
+        "border border-transparent transition-colors",
+        !isOperationActive &&
+          "hover:border-input-border focus-within:border-input-border-focus",
+        !editing && !isOperationActive && "cursor-text",
+        "px-3 py-1.5",
       )}
       onClick={() => {
         if (!editing && !isOperationActive) enterEdit();
@@ -75,13 +99,14 @@ export function UserMessage({ message }: UserMessageProps) {
             ref={textareaRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            onInput={handleInput}
             disabled={isOperationActive}
-            rows={3}
+            style={{ minHeight }}
             aria-label="Message text"
             className={cn(
-              "w-full min-h-[4.5rem] max-h-52 resize-y bg-transparent",
-              "text-sm text-sidebar-foreground placeholder:text-muted-foreground",
-              "outline-none focus-visible:outline-none",
+              "w-full resize-none bg-transparent px-0 py-0.5",
+              "text-sm leading-5 text-sidebar-foreground placeholder:text-muted-foreground",
+              "focus:outline-none",
               "disabled:opacity-50",
             )}
             onKeyDown={(e) => {
@@ -100,111 +125,86 @@ export function UserMessage({ message }: UserMessageProps) {
               }
             }}
           />
-          <p className="mt-1.5 text-[10px] text-muted-foreground/90 leading-snug">
-            Enter to replace · Shift+Enter newline · Esc to cancel
-          </p>
-        </>
-      ) : (
-        <span className="text-sm text-sidebar-foreground whitespace-pre-wrap">
-          {message.content}
-        </span>
-      )}
-    </div>
-  );
-
-  return (
-    <div className="group/user relative">
-      <ConfirmPopover
-        open={replaceConfirmOpen}
-        onOpenChange={setReplaceConfirmOpen}
-        anchor={bubble}
-        description="Replace this and discard later changes?"
-        confirmLabel="Replace"
-        destructive
-        onConfirm={() => {
-          void submitEdit(message.id, draft);
-          exitEdit();
-        }}
-      />
-
-      <div
-        className={cn(
-          "absolute -top-3 right-2 flex items-center gap-1",
-          "opacity-0 group-hover/user:opacity-100",
-          "transition-opacity",
-          (rollbackOpen || editing || replaceConfirmOpen) && "opacity-100",
-        )}
-      >
-        {editing ? (
-          <button
-            type="button"
-            onClick={() => exitEdit()}
-            disabled={isOperationActive}
-            aria-label="Cancel editing"
-            className={cn(
-              "flex items-center gap-1 px-2 py-0.5 rounded-md text-xs",
-              "border border-border bg-background text-muted-foreground",
-              "shadow-sm",
-              "hover:bg-muted/40 hover:text-foreground",
-              "disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-background disabled:hover:text-muted-foreground",
-              "transition-colors",
-            )}
-          >
-            Cancel
-          </button>
-        ) : (
-          <>
+          <div className="flex items-center justify-end gap-2 pt-1 mb-0.5 -mr-1">
             <button
               type="button"
-              onClick={enterEdit}
+              onClick={() => exitEdit()}
               disabled={isOperationActive}
-              aria-label="Edit message"
               className={cn(
-                "flex items-center gap-1 px-2 py-0.5 rounded-md text-xs",
-                "border border-border bg-background text-muted-foreground",
-                "shadow-sm",
-                "hover:bg-muted/40 hover:text-foreground",
-                "disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-background disabled:hover:text-muted-foreground",
+                "px-3 py-1.5 rounded-md text-sm",
+                "text-muted-foreground hover:text-foreground hover:bg-muted/40",
+                "disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted-foreground",
                 "transition-colors",
               )}
             >
-              <Pencil className="h-3 w-3" />
-              Edit
+              Cancel
             </button>
+            <ConfirmPopover
+              open={replaceConfirmOpen}
+              onOpenChange={setReplaceConfirmOpen}
+              description="Replace this and discard later changes?"
+              confirmLabel="Replace"
+              destructive
+              onConfirm={() => {
+                void submitEdit(message.id, draft);
+                exitEdit();
+              }}
+              anchor={
+                <button
+                  type="button"
+                  onClick={tryCommitDraft}
+                  disabled={!canSubmit}
+                  className={cn(
+                    "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm",
+                    "bg-primary text-primary-foreground",
+                    "disabled:opacity-50 disabled:cursor-not-allowed",
+                    "transition-colors",
+                  )}
+                >
+                  <Send className="h-3.5 w-3.5" />
+                  Send
+                </button>
+              }
+            />
+          </div>
+        </>
+      ) : (
+        <>
+          <span className="text-sm text-sidebar-foreground whitespace-pre-wrap">
+            {message.content}
+          </span>
 
-            {!isMuteBoundary && (
-              <ConfirmPopover
-                open={rollbackOpen}
-                onOpenChange={setRollbackOpen}
-                description="Roll back this and later changes?"
-                confirmLabel="Roll back"
-                destructive
-                onConfirm={() => {
-                  void startRollback(message.id);
-                }}
-                trigger={
-                  <button
-                    type="button"
-                    disabled={isOperationActive}
-                    aria-label="Roll back to this message"
-                    className={cn(
-                      "flex items-center gap-1 px-2 py-0.5 rounded-md text-xs",
-                      "border border-border bg-background text-muted-foreground",
-                      "shadow-sm",
-                      "hover:bg-muted/40 hover:text-foreground",
-                      "disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-background disabled:hover:text-muted-foreground",
-                      "transition-colors",
-                    )}
-                  >
-                    <RotateCcw className="h-3 w-3" />
-                    Rollback
-                  </button>
-                }
-              />
-            )}
-          </>
-        )}
-      </div>
+          {!isMuteBoundary && !isOperationActive && (
+            <ConfirmPopover
+              open={rollbackOpen}
+              onOpenChange={setRollbackOpen}
+              description="Roll back this and later changes?"
+              confirmLabel="Roll back"
+              destructive
+              onConfirm={() => {
+                void startRollback(message.id);
+              }}
+              trigger={
+                <button
+                  type="button"
+                  aria-label="Roll back to this message"
+                  onClick={(e) => e.stopPropagation()}
+                  className={cn(
+                    "absolute bottom-1.5 right-1.5",
+                    "h-6 w-6 rounded-md flex items-center justify-center",
+                    "text-muted-foreground hover:text-foreground hover:bg-muted/40",
+                    "transition-colors",
+                    "opacity-0 group-hover/user:opacity-100",
+                    rollbackOpen && "opacity-100",
+                  )}
+                >
+                  <Undo2 className="h-3.5 w-3.5" />
+                </button>
+              }
+            />
+          )}
+        </>
+      )}
     </div>
   );
 }

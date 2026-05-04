@@ -1,7 +1,8 @@
 import { cn } from "@/lib/utils";
 import { Send, Square } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import type { KeyboardEvent } from "react";
+import { useAutoGrowTextarea } from "@/hooks/useAutoGrowTextarea";
 
 const MIN_LINES = 2;
 const MAX_LINES = 8;
@@ -22,21 +23,12 @@ export function ChatInput({
   placeholder = "Type a message...",
 }: ChatInputProps) {
   const [value, setValue] = useState("");
-  const [metrics, setMetrics] = useState({ lineHeight: 20, padding: 8 });
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    if (textareaRef.current) {
-      const computed = window.getComputedStyle(textareaRef.current);
-      const lh = parseFloat(computed.lineHeight) || 20;
-      const pt = parseFloat(computed.paddingTop) || 0;
-      const pb = parseFloat(computed.paddingBottom) || 0;
-      setMetrics({ lineHeight: lh, padding: pt + pb });
-    }
-  }, []);
-
-  const minHeight = MIN_LINES * metrics.lineHeight + metrics.padding;
-  const maxHeight = MAX_LINES * metrics.lineHeight + metrics.padding;
+  const {
+    ref: textareaRef,
+    onInput: handleInput,
+    minHeight,
+    reset: resetHeight,
+  } = useAutoGrowTextarea({ minLines: MIN_LINES, maxLines: MAX_LINES });
 
   const handleSubmit = useCallback(() => {
     const trimmed = value.trim();
@@ -44,11 +36,8 @@ export function ChatInput({
 
     onSubmit(trimmed);
     setValue("");
-
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
-    }
-  }, [value, disabled, isAgentWorking, onSubmit]);
+    resetHeight();
+  }, [value, disabled, isAgentWorking, onSubmit, resetHeight]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -59,14 +48,6 @@ export function ChatInput({
     },
     [handleSubmit],
   );
-
-  const handleInput = useCallback(() => {
-    const textarea = textareaRef.current;
-    if (textarea) {
-      textarea.style.height = "auto";
-      textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
-    }
-  }, [maxHeight]);
 
   const canSend = !disabled && !isAgentWorking && value.trim().length > 0;
   const canInterrupt = isAgentWorking && onInterrupt;
