@@ -61,6 +61,7 @@ interface ChatState {
 
   appendUserMessage: (text: string) => Promise<void>;
   startRollback: (targetMessageId: string) => Promise<void>;
+  submitEdit: (messageId: string, newText: string) => Promise<void>;
   interruptCurrentOperation: () => Promise<void>;
   retryCurrentOperation: () => Promise<void>;
   cancelCurrentOperation: () => void;
@@ -181,19 +182,20 @@ export const useChatStore = create<ChatState>((set, get) => {
   };
 
   /**
-   * Drive the current "rollback" operation through withRetry. Used both by
-   * startRollback and by user-triggered retryCurrentOperation, so they share
-   * identical retry/abort/failure semantics.
+   * Drive rollback (`rollback` | `edit` phase A) through withRetry. Used by
+   * startRollback, submitEdit, and retryCurrentOperation so retry/abort
+   * semantics stay unified. Optimistic mute is applied before this runs.
    *
-   * On success we shift the muted boundary, swap fileContent and recompute
-   * responseIndex so the mock resumes from the rollback point. On abort we
-   * just clear the operation (no chat-history breadcrumb — Stop on a
-   * rollback is a clean cancel). On exhausted retries we leave the operation
-   * in `failed` state for the inline callout.
+   * On success — plain rollback clears the operation; edit commits file state,
+   * clears the edit operation, then `appendUserMessage(pendingText)` burns the
+   * muted suffix (including the old user bubble) and starts send. On abort we
+   * revert optimistic mute. On exhausted retries we leave the operation
+   * `failed` for the inline callout.
    */
   const runRollbackOperation = async (): Promise<void> => {
     const op = get().currentOperation;
-    if (!op || op.type !== "rollback" || !op.anchorMessageId) return;
+    if (!op || !op.anchorMessageId) return;
+    if (op.type !== "rollback" && op.type !== "edit") return;
     const targetId = op.anchorMessageId;
 
     const controller = new AbortController();
@@ -207,7 +209,9 @@ export const useChatStore = create<ChatState>((set, get) => {
           maxAttempts: MAX_ATTEMPTS,
           onAttempt: (n) => {
             if (n === 1) {
-              appendOperationEvent("Rolling back...");
+              appendOperationEvent(
+                op.type === "edit" ? "Applying edit..." : "Rolling back...",
+              );
             } else {
               updateOperation({ status: "retrying", retryCount: n - 1 });
               appendOperationEvent(
@@ -235,16 +239,21 @@ export const useChatStore = create<ChatState>((set, get) => {
         return;
       }
 
-      // mutedFromMessageId was already set optimistically in startRollback.
-      // Here we only need to commit fileContent and resync responseIndex
-      // against the now-frozen muted boundary so the mock generator
-      // resumes from the right place on the next send.
+      // mutedFromMessageId was already set optimistically in startRollback /
+      // submitEdit. Here we only commit fileContent and resync responseIndex.
       set({
         fileContent: result.fileContent,
         responseIndex: recomputeResponseIndex(messages, targetId),
       });
 
+      const pendingText =
+        op.type === "edit" ? (op.pendingText ?? "").trim() : "";
+
       clearOperation();
+
+      if (op.type === "edit" && pendingText.length > 0) {
+        await get().appendUserMessage(pendingText);
+      }
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
         // Stop = user pulled out — undo the optimistic mute so the chat
@@ -451,6 +460,36 @@ export const useChatStore = create<ChatState>((set, get) => {
       await runRollbackOperation();
     },
 
+    submitEdit: async (messageId: string, newText: string) => {
+      if (get().currentOperation !== null) return;
+
+      const trimmed = newText.trim();
+      if (trimmed === "") return;
+
+      const { messages, mutedFromMessageId: previousMuted } = get();
+      const target = messages.find((m) => m.id === messageId);
+      if (!target || target.type !== "user") return;
+      if (trimmed === target.content.trim()) return;
+
+      const operation: Operation = {
+        id: generateId(),
+        type: "edit",
+        status: "running",
+        anchorMessageId: messageId,
+        pendingText: trimmed,
+        history: [],
+        retryCount: 0,
+        previousMutedFromMessageId: previousMuted,
+      };
+
+      set({
+        currentOperation: operation,
+        mutedFromMessageId: messageId,
+      });
+
+      await runRollbackOperation();
+    },
+
     retryCurrentOperation: async () => {
       const op = get().currentOperation;
       if (!op || op.status !== "failed") return;
@@ -468,7 +507,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           await runRollbackOperation();
           break;
         case "edit":
-          // Edit retry lands in c12 alongside submitEdit.
+          await runRollbackOperation();
           break;
       }
     },

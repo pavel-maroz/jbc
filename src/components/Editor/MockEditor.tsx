@@ -3,9 +3,12 @@ import { File } from "lucide-react";
 
 export function MockEditor() {
   const fileContent = useChatStore((s) => s.fileContent);
-  const isRollbackRestoring = useChatStore((s) => {
+  const isFileRestoring = useChatStore((s) => {
     const op = s.currentOperation;
-    return op?.type === "rollback" && op.status !== "failed";
+    return (
+      (op?.type === "rollback" || op?.type === "edit") &&
+      op.status !== "failed"
+    );
   });
 
   return (
@@ -38,7 +41,7 @@ export function MockEditor() {
           )}
         </div>
 
-        {isRollbackRestoring && (
+        {isFileRestoring && (
           <div
             className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-none bg-background/55 backdrop-blur-[2px]"
             aria-live="polite"
