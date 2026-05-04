@@ -9,8 +9,9 @@ import type {
   Operation,
   ToolOperationMessage as ToolOperationMessageType,
 } from "@/types/chat";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AgentMessage } from "./AgentMessage";
+import { ConfirmPopover } from "./ConfirmPopover";
 import { ErrorMessage } from "./ErrorMessage";
 import { FeedbackForm } from "./FeedbackForm";
 import { ToolOperationMessage } from "./ToolOperationMessage";
@@ -108,6 +109,42 @@ function OperationStatus({
       }
       history={operation.history}
     />
+  );
+}
+
+/**
+ * In-place "Undo rollback" affordance. Lives in the same slot a
+ * `WorkingIndicator` occupied during the rollback round-trip so the
+ * layout doesn't shift when WI disappears on success — outer wrapper
+ * (`mx-3 min-w-0 overflow-hidden`), the `flex flex-col gap-1 text-xs`
+ * frame, and the single-line `text-xs text-muted-foreground` row all
+ * mirror `WorkingIndicator`'s collapsed shape.
+ */
+function UndoRollbackButton() {
+  const undoRollback = useChatStore((s) => s.undoRollback);
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="flex flex-col gap-1 text-xs text-muted-foreground">
+      <div className="flex items-center justify-end gap-1">
+        <ConfirmPopover
+          open={open}
+          onOpenChange={setOpen}
+          description="Undo this rollback?"
+          confirmLabel="Undo"
+          destructive
+          onConfirm={undoRollback}
+          trigger={
+            <button
+              type="button"
+              className="hover:text-foreground hover:underline transition-colors"
+            >
+              Undo rollback
+            </button>
+          }
+        />
+      </div>
+    </div>
   );
 }
 
@@ -263,6 +300,21 @@ export function MessageList({ messages }: MessageListProps) {
       }
     };
 
+    // The Undo affordance lives in the same slot as the rollback
+    // WorkingIndicator (right under the boundary message). Gated on
+    // "no live operation + mute boundary set"; while a rollback is
+    // running/retrying or failed, the operation status itself owns the
+    // slot via renderAnchorIfMatches.
+    const renderUndoIfMatches = (id: string) => {
+      if (currentOperation !== null) return;
+      if (mutedFromMessageId === null || id !== mutedFromMessageId) return;
+      elements.push(
+        <div key={`undo-rb-${id}`} className="mx-3 min-w-0 overflow-hidden">
+          <UndoRollbackButton />
+        </div>,
+      );
+    };
+
     const flushToolCallGroup = () => {
       if (toolCallGroup.length === 0) return;
       const lastInGroup = toolCallGroup[toolCallGroup.length - 1];
@@ -283,6 +335,7 @@ export function MessageList({ messages }: MessageListProps) {
         </div>,
       );
       renderAnchorIfMatches(lastInGroup.message.id);
+      renderUndoIfMatches(lastInGroup.message.id);
       toolCallGroup = [];
     };
 
@@ -306,6 +359,7 @@ export function MessageList({ messages }: MessageListProps) {
         </div>,
       );
       renderAnchorIfMatches(message.id);
+      renderUndoIfMatches(message.id);
     }
 
     flushToolCallGroup();

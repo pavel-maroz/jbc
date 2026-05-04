@@ -62,6 +62,7 @@ interface ChatState {
   appendUserMessage: (text: string) => Promise<void>;
   startRollback: (targetMessageId: string) => Promise<void>;
   submitEdit: (messageId: string, newText: string) => Promise<void>;
+  undoRollback: () => void;
   interruptCurrentOperation: () => Promise<void>;
   retryCurrentOperation: () => Promise<void>;
   cancelCurrentOperation: () => void;
@@ -488,6 +489,46 @@ export const useChatStore = create<ChatState>((set, get) => {
       });
 
       await runRollbackOperation();
+    },
+
+    /**
+     * Reverse the most recent rollback while the muted suffix is still
+     * present (i.e. before any new user message burns it). The needed
+     * post-suffix file state is recovered from the history itself: every
+     * tool_operation snapshot stores fileContent at the moment it ran, so
+     * the last tool_operation inside the muted suffix carries the file
+     * state at the end of the rolled-back range. If no tool_operation
+     * exists in the suffix, the file was never modified there and the
+     * current fileContent is already correct — we only flip the boundary.
+     *
+     * Reversibility cuts both ways: a re-click on Rollback for the same
+     * target restores the muted state, so undo itself needs no extra
+     * snapshot to be undoable.
+     */
+    undoRollback: () => {
+      if (get().currentOperation !== null) return;
+      const { messages, mutedFromMessageId } = get();
+      if (mutedFromMessageId === null) return;
+
+      const cutIndex = messages.findIndex(
+        (m) => m.id === mutedFromMessageId,
+      );
+      if (cutIndex === -1) return;
+
+      let restoredFile: string[] | null = null;
+      for (let i = messages.length - 1; i >= cutIndex; i--) {
+        const m = messages[i];
+        if (m.type === "tool_operation" && m.fileContent) {
+          restoredFile = m.fileContent;
+          break;
+        }
+      }
+
+      set({
+        mutedFromMessageId: null,
+        ...(restoredFile ? { fileContent: restoredFile } : {}),
+        responseIndex: recomputeResponseIndex(messages, null),
+      });
     },
 
     retryCurrentOperation: async () => {
