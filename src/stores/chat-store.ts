@@ -99,6 +99,26 @@ export const useChatStore = create<ChatState>((set, get) => {
     });
   };
 
+  /**
+   * Drop every accumulated event from the live operation's history.
+   *
+   * The send stream yields many messages within a single operation
+   * (text + tool_call + text + …), and any retry/reconnect events are
+   * only meaningful for the in-flight attempt. Without resetting after
+   * each successful yield, the WorkingIndicator under message N still
+   * exposes the "Reconnecting (attempt 2/3) → Reconnected." trail from
+   * the round-trip that produced message N-1.
+   */
+  const resetOperationHistory = () => {
+    set((state) => {
+      if (!state.currentOperation) return {};
+      if (state.currentOperation.history.length === 0) return {};
+      return {
+        currentOperation: { ...state.currentOperation, history: [] },
+      };
+    });
+  };
+
   const clearOperation = () => {
     activeController = null;
     set({ currentOperation: null });
@@ -334,6 +354,11 @@ export const useChatStore = create<ChatState>((set, get) => {
           get().updateFileContent(newFile);
         }
       }
+
+      // Each delivered chat message starts a fresh "phase" of the operation;
+      // any retry/reconnect events were tied to the round-trip that produced
+      // *this* message and are no longer relevant for the next yield.
+      resetOperationHistory();
     }
   };
 
@@ -535,8 +560,11 @@ export const useChatStore = create<ChatState>((set, get) => {
       const op = get().currentOperation;
       if (!op || op.status !== "failed") return;
 
-      // Reset to running for a fresh attempt; keep accumulated history so the
-      // user can still expand it and see prior failures.
+      // Manual retry is a fresh action from the user's perspective — the
+      // previous attempt's trail (stale "Attempt N failed", "Reconnecting…")
+      // is no longer relevant and would otherwise hang around as the
+      // expanded WI dropdown for the new attempt.
+      resetOperationHistory();
       updateOperation({ status: "running", retryCount: 0 });
       appendOperationEvent("Retrying...");
 
